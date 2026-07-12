@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Поиск по базе кейсов Mono-Jetronic / Mono-Motronic</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #1a1a1a);
+    --hint: var(--tg-theme-hint-color, #707579);
+    --link: var(--tg-theme-link-color, #2481cc);
+    --button: var(--tg-theme-button-color, #2481cc);
+    --button-text: var(--tg-theme-button-text-color, #ffffff);
+    --secondary-bg: var(--tg-theme-secondary-bg-color, #f4f4f5);
+    --section-bg: var(--tg-theme-section-bg-color, #ffffff);
+    --border: rgba(0,0,0,0.08);
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; padding:0;
+    background: var(--secondary-bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #searchbar{
+    position: sticky; top:0; z-index: 10;
+    background: var(--bg);
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  #searchbar input{
+    width:100%;
+    padding: 11px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--secondary-bg);
+    color: var(--text);
+    font-size: 16px;
+    outline: none;
+  }
+  #filters{
+    display:flex; gap:6px; margin-top:8px; overflow-x:auto; padding-bottom:2px;
+  }
+  .chip{
+    flex-shrink:0;
+    padding:5px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    font-size: 13px;
+    color: var(--hint);
+    background: var(--secondary-bg);
+    cursor:pointer;
+    user-select:none;
+  }
+  .chip.active{
+    background: var(--button);
+    color: var(--button-text);
+    border-color: var(--button);
+  }
+  #meta{
+    padding: 8px 14px 2px;
+    font-size: 12.5px;
+    color: var(--hint);
+  }
+  #results{ padding: 4px 10px 24px; }
+  .card{
+    background: var(--section-bg);
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin: 8px 0;
+    border: 1px solid var(--border);
+  }
+  .card .id{
+    display:inline-block;
+    font-size: 11px;
+    color: var(--hint);
+    background: var(--secondary-bg);
+    padding: 1px 7px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .card .model{
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 4px;
+  }
+  .card .symptom{
+    font-size: 14px;
+    line-height:1.4;
+    margin-bottom: 6px;
+  }
+  .card .symptom b{ background: rgba(36,129,204,0.18); border-radius:3px; }
+  .card .solution{
+    font-size: 13.5px;
+    line-height:1.4;
+    color: var(--hint);
+    border-top: 1px dashed var(--border);
+    padding-top: 6px;
+    margin-top: 4px;
+  }
+  .card .solution .label{
+    color: var(--link);
+    font-weight: 600;
+  }
+  #empty, #loading{
+    text-align:center;
+    color: var(--hint);
+    padding: 40px 20px;
+    font-size: 14px;
+  }
+  #loadmore{
+    display:block;
+    margin: 10px auto 20px;
+    padding: 10px 22px;
+    border-radius: 10px;
+    border: none;
+    background: var(--button);
+    color: var(--button-text);
+    font-size: 14px;
+  }
+  #hint-empty{
+    padding: 30px 20px;
+    text-align:center;
+    color: var(--hint);
+    font-size: 14px;
+    line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<div id="searchbar">
+  <input id="q" type="text" placeholder="Симптом, модель, код ошибки…" autocomplete="off">
+  <div id="filters">
+    <div class="chip active" data-src="ALL">Все источники</div>
+    <div class="chip" data-src="EU">🌍 Евро</div>
+    <div class="chip" data-src="RU">🇷🇺 RU</div>
+    <div class="chip" data-src="DE">🇩🇪 DE</div>
+  </div>
+</div>
+<div id="meta"></div>
+<div id="results"></div>
+
+<script>
+(function(){
+  const tg = window.Telegram ? window.Telegram.WebApp : null;
+  if (tg) { tg.ready(); tg.expand(); }
+
+  const STOPWORDS = new Set(["и","в","на","с","по","для","не","при","из","от","до","как","что",
+    "это","или","а","но","к","у","о","об","то","the","a","an","is","of","on","at","and","or"]);
+
+  const els = {
+    q: document.getElementById("q"),
+    results: document.getElementById("results"),
+    meta: document.getElementById("meta"),
+    filters: document.getElementById("filters"),
+  };
+
+  let DB = [];               // [case_id, source, model, symptom_orig, symptom_ru, solution]
+  let activeSource = "ALL";
+  let currentResults = [];
+  let shown = 0;
+  const PAGE = 15;
+
+  function tokenize(str){
+    return (str.toLowerCase().match(/[a-zа-яё0-9]+/gi) || [])
+      .filter(t => t.length > 1 && !STOPWORDS.has(t));
+  }
+
+  function escapeHtml(s){
+    return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  }
+
+  function highlight(text, tokens){
+    if (!text) return "";
+    let out = escapeHtml(text);
+    const uniq = [...new Set(tokens.map(t=>t.toLowerCase()))].sort((a,b)=>b.length-a.length);
+    uniq.forEach(t => {
+      if (!t) return;
+      const re = new RegExp("(" + t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
+      out = out.replace(re, "<b>$1</b>");
+    });
+    return out;
+  }
+
+  function score(rec, tokens){
+    const hay = (rec[2] + " " + rec[3] + " " + rec[4] + " " + rec[5]).toLowerCase();
+    let matched = 0;
+    tokens.forEach(t => { if (hay.includes(t)) matched++; });
+    return matched;
+  }
+
+  function search(query){
+    const tokens = tokenize(query);
+    if (!tokens.length) return [];
+    let pool = DB;
+    if (activeSource !== "ALL") pool = DB.filter(r => r[1] === activeSource);
+
+    const scored = [];
+    for (const rec of pool){
+      const m = score(rec, tokens);
+      if (m > 0) scored.push([m, rec]);
+    }
+    scored.sort((a,b) => b[0] - a[0]);
+    return scored.map(([m, rec]) => ({rec, matched: m, tokens}));
+  }
+
+  function renderCard(item){
+    const [case_id, source, model, symptom_orig, symptom_ru, solution] = item.rec;
+    const symptom = symptom_ru || symptom_orig;
+    const srcLabel = {EU:"🌍", RU:"🇷🇺", DE:"🇩🇪"}[source] || "";
+    return `
+      <div class="card">
+        <span class="id">${srcLabel} ${case_id}</span>
+        <div class="model">${escapeHtml(model)}</div>
+        <div class="symptom">❗️ ${highlight(symptom, item.tokens)}</div>
+        <div class="solution"><span class="label">Решение:</span> ${highlight(solution, item.tokens)}</div>
+      </div>`;
+  }
+
+  function renderResults(){
+    const query = els.q.value.trim();
+    els.results.innerHTML = "";
+    els.meta.textContent = "";
+
+    if (!query){
+      els.results.innerHTML = `<div id="hint-empty">
+        Введите симптом, модель авто или код ошибки.<br>
+        Например: <i>«плавает холостой ход»</i>, <i>«Audi 80 расход топлива»</i>, <i>«ДТОЖ»</i>.
+      </div>`;
+      return;
+    }
+
+    currentResults = search(query);
+    shown = 0;
+
+    if (!currentResults.length){
+      els.meta.textContent = `Найдено: 0`;
+      els.results.innerHTML = `<div id="empty">
+        По запросу «${escapeHtml(query)}» ничего не найдено.<br><br>
+        Попробуйте сократить запрос до 1–2 ключевых слов.
+      </div>`;
+      return;
+    }
+
+    els.meta.textContent = `Найдено: ${currentResults.length}`;
+    appendPage();
+  }
+
+  function appendPage(){
+    const next = currentResults.slice(shown, shown + PAGE);
+    const html = next.map(renderCard).join("");
+    const btnOld = document.getElementById("loadmore");
+    if (btnOld) btnOld.remove();
+    els.results.insertAdjacentHTML("beforeend", html);
+    shown += next.length;
+    if (shown < currentResults.length){
+      const btn = document.createElement("button");
+      btn.id = "loadmore";
+      btn.textContent = `Показать ещё (${currentResults.length - shown})`;
+      btn.onclick = appendPage;
+      els.results.appendChild(btn);
+    }
+  }
+
+  let debounceTimer;
+  els.q.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(renderResults, 150);
+  });
+
+  els.filters.addEventListener("click", (e) => {
+    const chip = e.target.closest(".chip");
+    if (!chip) return;
+    [...els.filters.children].forEach(c => c.classList.remove("active"));
+    chip.classList.add("active");
+    activeSource = chip.dataset.src;
+    renderResults();
+  });
+
+  els.results.innerHTML = `<div id="loading">Загрузка базы кейсов…</div>`;
+  fetch("cases.json")
+    .then(r => r.json())
+    .then(data => {
+      DB = data;
+      els.results.innerHTML = "";
+      renderResults();
+    })
+    .catch(err => {
+      els.results.innerHTML = `<div id="empty">Не удалось загрузить базу: ${escapeHtml(String(err))}</div>`;
+    });
+})();
+</script>
+</body>
+</html>
