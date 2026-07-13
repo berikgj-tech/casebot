@@ -42,20 +42,23 @@
     outline: none;
   }
   #filters{
-    display:flex; gap:6px; margin-top:8px; overflow-x:auto; padding-bottom:2px;
+    display:flex; gap:6px; margin-top:8px;
   }
-  .chip{
-    flex-shrink:0;
-    padding:5px 12px;
-    border-radius: 14px;
+  #filters select{
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 7px 8px;
+    border-radius: 10px;
     border: 1px solid var(--border);
-    font-size: 13px;
-    color: var(--hint);
     background: var(--secondary-bg);
-    cursor:pointer;
-    user-select:none;
+    color: var(--text);
+    font-size: 12.5px;
+    outline: none;
+    -webkit-appearance: none;
+    appearance: none;
   }
-  .chip.active{
+  #filters select:disabled{ opacity: 0.45; }
+  #filters select.active{
     background: var(--button);
     color: var(--button-text);
     border-color: var(--button);
@@ -73,6 +76,10 @@
     margin: 8px 0;
     border: 1px solid var(--border);
   }
+  .card .rowtop{
+    display:flex; align-items:center; justify-content:space-between; gap:8px;
+    margin-bottom: 6px;
+  }
   .card .id{
     display:inline-block;
     font-size: 11px;
@@ -80,8 +87,18 @@
     background: var(--secondary-bg);
     padding: 1px 7px;
     border-radius: 6px;
-    margin-bottom: 6px;
   }
+  .card .percent{
+    display:inline-block;
+    font-size: 11px;
+    font-weight:600;
+    padding: 1px 8px;
+    border-radius: 6px;
+    white-space: nowrap;
+  }
+  .percent.p-high{ background: rgba(46,160,67,0.18); color: #2ea043; }
+  .percent.p-mid{ background: rgba(210,153,34,0.18); color: #d29922; }
+  .percent.p-low{ background: rgba(120,120,120,0.18); color: var(--hint); }
   .card .model{
     font-weight: 600;
     font-size: 15px;
@@ -135,10 +152,9 @@
 <div id="searchbar">
   <input id="q" type="text" placeholder="Симптом, модель, код ошибки…" autocomplete="off">
   <div id="filters">
-    <div class="chip active" data-src="ALL">Все источники</div>
-    <div class="chip" data-src="EU">🌍 Евро</div>
-    <div class="chip" data-src="RU">🇷🇺 RU</div>
-    <div class="chip" data-src="DE">🇩🇪 DE</div>
+    <select id="f-marque"><option value="">Марка: –</option></select>
+    <select id="f-model"><option value="">Модель: –</option></select>
+    <select id="f-engine"><option value="">Двигатель: –</option></select>
   </div>
 </div>
 <div id="meta"></div>
@@ -149,95 +165,387 @@
   const tg = window.Telegram ? window.Telegram.WebApp : null;
   if (tg) { tg.ready(); tg.expand(); }
 
+  // ===================== Данные и справочники =====================
+
   const STOPWORDS = new Set(["и","в","на","с","по","для","не","при","из","от","до","как","что",
-    "это","или","а","но","к","у","о","об","то","the","a","an","is","of","on","at","and","or"]);
+    "это","или","а","но","к","у","о","об","то","же","бы","ли","так","только",
+    "the","a","an","is","of","on","at","and","or","за","под","над","между","без"]);
+
+  const ABBR = {
+    "дтож": ["датчик","температура","охлаждающий","жидкость"],
+    "дтвв": ["датчик","температура","всасываемый","воздух"],
+    "двтв": ["датчик","температура","всасываемый","воздух"],
+    "дпдз": ["датчик","положение","дроссельный","заслонка","потенциометр"],
+    "рхх": ["регулятор","холостой","ход","актуатор","шаговый","двигатель"],
+    "хх": ["холостой","ход"],
+    "эбу": ["блок","управление","электронный"],
+    "вут": ["вакуумный","усилитель","тормоз"],
+    "гур": ["гидроусилитель","руль"],
+    "уоз": ["угол","опережение","зажигание"],
+    "vss": ["датчик","скорость","автомобиль"],
+    "g69": ["дпдз","дроссельный","заслонка","потенциометр"],
+    "g62": ["дтож","охлаждающий","жидкость"],
+    "g42": ["дтвв","всасываемый","воздух"],
+    "f60": ["концевик","холостой","ход","выключатель"],
+    "v60": ["рхх","актуатор","дроссельный","заслонка"],
+    "co": ["со","монооксид","углерод"],
+  };
+
+  const MARQUE_SYNONYMS = {
+    "ауди": "audi", "audi": "audi",
+    "фольксваген": "vw", "вольксваген": "vw", "вв": "vw", "vw": "vw", "volkswagen": "vw",
+    "гольф": "golf", "пассат": "passat", "джетта": "jetta", "венто": "vento",
+    "пежо": "peugeot", "ситроен": "citroen", "ситроён": "citroen",
+    "фиат": "fiat", "ланча": "lancia", "лянча": "lancia",
+    "сеат": "seat", "сиат": "seat", "рено": "renault", "ровер": "rover",
+    "ибица": "ibiza", "толедо": "toledo", "дедра": "dedra", "темпра": "tempra",
+    "типо": "tipo", "уно": "uno",
+  };
+
+  // марка/модель/код двигателя по точной строке model (собрано из базы, 97 вариантов)
+  const MODEL_LOOKUP = {"VW Golf II RP 1.8 Mono-Jetronic":{"marque":"VW","model":"Golf II","engine_code":"RP"},"VW Jetta II RP 1.8 Mono-Jetronic":{"marque":"VW","model":"Jetta II","engine_code":"RP"},"VW Passat B3 RP 1.8 Mono-Jetronic":{"marque":"VW","model":"Passat B3","engine_code":"RP"},"Audi 80 B3 PM 1.8 Mono-Jetronic":{"marque":"Audi","model":"80 B3","engine_code":"PM"},"Peugeot 205 TU3M 1.4 Mono-Jetronic":{"marque":"Peugeot","model":"205","engine_code":"TU3M"},"VW Golf III ABS 1.8 Mono-Motronic":{"marque":"VW","model":"Golf III","engine_code":"ABS"},"Renault Clio I E7J 1.4 Single-point":{"marque":"Renault","model":"Clio I","engine_code":"E7J"},"Audi 80 B4 ABT 2.0 Mono-Motronic":{"marque":"Audi","model":"80 B4","engine_code":"ABT"},"Fiat Tipo 1.4 i.e. Mono-Motronic":{"marque":"Fiat","model":"Tipo","engine_code":null},"VW Golf III 1.8 AAM Mono-Motronic":{"marque":"VW","model":"Golf III","engine_code":"AAM"},"Citroën AX 1.4 TGi Mono-Jetronic":{"marque":"Citroën","model":"AX","engine_code":"TGi"},"Audi 80 B3 1.8 PM Mono-Jetronic":{"marque":"Audi","model":"80 B3","engine_code":"PM"},"Peugeot 106 1.1 HDZ Mono-Motronic":{"marque":"Peugeot","model":"106","engine_code":"HDZ"},"SEAT Ibiza II 1.6 1F Mono-Motronic":{"marque":"SEAT","model":"Ibiza II","engine_code":"1F"},"VW Passat B4 1.8 ADZ Mono-Motronic":{"marque":"VW","model":"Passat B4","engine_code":"ADZ"},"Lancia Dedra 1.6 i.e. Mono-Jetronic":{"marque":"Lancia","model":"Dedra","engine_code":null},"VW Golf II 1.8 RP Mono-Jetronic":{"marque":"VW","model":"Golf II","engine_code":"RP"},"Peugeot 306 1.4 Mono-Motronic":{"marque":"Peugeot","model":"306","engine_code":null},"Audi 80 B4 2.0 ABT Mono-Motronic":{"marque":"Audi","model":"80 B4","engine_code":"ABT"},"Fiat Uno 1.4 i.e. Mono-Motronic":{"marque":"Fiat","model":"Uno","engine_code":null},"VW Jetta II 1.8 RP Mono-Jetronic":{"marque":"VW","model":"Jetta II","engine_code":"RP"},"Rover 200 214i Single-point":{"marque":"Rover","model":"200 214i","engine_code":null},"VW Vento 1.8 ABS Mono-Motronic":{"marque":"VW","model":"Vento","engine_code":"ABS"},"Peugeot 405 1.6 Mono-Jetronic":{"marque":"Peugeot","model":"405","engine_code":null},"VW Golf III 1.8 ACC Mono-Motronic (Рынок США)":{"marque":"VW","model":"Golf III","engine_code":"ACC"},"Peugeot 205 1.4 TU3M Mono-Jetronic":{"marque":"Peugeot","model":"205","engine_code":"TU3M"},"Fiat Tempra 1.6 i.e. Mono-Rotronic":{"marque":"Fiat","model":"Tempra","engine_code":null},"VW Golf III 1.8 ACC Mono-Motronic":{"marque":"VW","model":"Golf III","engine_code":"ACC"},"Citroën Berlingo I 1.4 Mono-Motronic":{"marque":"Citroën","model":"Berlingo I","engine_code":null},"Renault Super 5 1.4 C3J Single-point":{"marque":"Renault","model":"Super 5","engine_code":"C3J"},"Lancia Y10 1.1 i.e. Mono-Jetronic":{"marque":"Lancia","model":"Y10","engine_code":null},"VW Passat B3 1.8 RP Mono-Jetronic":{"marque":"VW","model":"Passat B3","engine_code":"RP"},"Peugeot 405 1.6 BDY Mono-Motronic":{"marque":"Peugeot","model":"405","engine_code":"BDY"},"VW Jetta III 1.8 ACC Mono-Motronic":{"marque":"VW","model":"Jetta III","engine_code":"ACC"},"SEAT Toledo I 1.8 ABS Mono-Motronic":{"marque":"SEAT","model":"Toledo I","engine_code":"ABS"},"Fiat Tipo 1.6 i.e. Mono-Motronic":{"marque":"Fiat","model":"Tipo","engine_code":null},"Citroën AX 1.1 KDX Mono-Motronic":{"marque":"Citroën","model":"AX","engine_code":"KDX"},"VW Golf III 1.8 ABS Mono-Motronic":{"marque":"VW","model":"Golf III","engine_code":"ABS"},"Peugeot 306 1.4 TU3M Mono-Jetronic":{"marque":"Peugeot","model":"306","engine_code":"TU3M"},"Fiat Uno 1.1 i.e. Mono-Motronic":{"marque":"Fiat","model":"Uno","engine_code":null},"Renault Clio I 1.4 E7J Single-point":{"marque":"Renault","model":"Clio I","engine_code":"E7J"},"Peugeot 106 1.4 TU3M Mono-Jetronic":{"marque":"Peugeot","model":"106","engine_code":"TU3M"},"Citroën ZX 1.4 TU3M Mono-Motronic":{"marque":"Citroën","model":"ZX","engine_code":"TU3M"},"Peugeot 205 1.1 TU1M Mono-Motronic":{"marque":"Peugeot","model":"205","engine_code":"TU1M"},"SEAT Cordoba I 1.8 ABS Mono-Motronic":{"marque":"SEAT","model":"Cordoba I","engine_code":"ABS"},"Fiat Uno 1.4 i.e. Mono-Jetronic":{"marque":"Fiat","model":"Uno","engine_code":null},"VW Vento 1.8 ADZ Mono-Motronic":{"marque":"VW","model":"Vento","engine_code":"ADZ"},"Peugeot 306 1.4 TU3M Mono-Motronic":{"marque":"Peugeot","model":"306","engine_code":"TU3M"},"Lancia Dedra 1.6 i.e. Mono-Motronic":{"marque":"Lancia","model":"Dedra","engine_code":null},"Citroën AX 1.4 TU3M Mono-Jetronic":{"marque":"Citroën","model":"AX","engine_code":"TU3M"},"Fiat Tempra 1.6 i.e. Mono-Jetronic":{"marque":"Fiat","model":"Tempra","engine_code":null},"Peugeot 405 1.6 Mono-Motronic":{"marque":"Peugeot","model":"405","engine_code":null},"SEAT Ibiza II 1.8 ABS Mono-Motronic":{"marque":"SEAT","model":"Ibiza II","engine_code":"ABS"},"Citroën ZX 1.4 TU3M Mono-Jetronic":{"marque":"Citroën","model":"ZX","engine_code":"TU3M"},"Peugeot 106 1.1 TU1M Mono-Motronic":{"marque":"Peugeot","model":"106","engine_code":"TU1M"},"Citroën AX 1.4 TU3M Mono-Motronic":{"marque":"Citroën","model":"AX","engine_code":"TU3M"},"Fiat Tempra 1.4 i.e. Mono-Motronic":{"marque":"Fiat","model":"Tempra","engine_code":null},"Fiat Tempra 1.6 i.e. Mono-Motronic":{"marque":"Fiat","model":"Tempra","engine_code":null},"Peugeot 106 1.4 TU3M Mono-Motronic":{"marque":"Peugeot","model":"106","engine_code":"TU3M"},"VW Passat B4 1.8 AAM Mono-Motronic":{"marque":"VW","model":"Passat B4","engine_code":"AAM"},"SEAT Toledo I 1.8 ACC Mono-Motronic":{"marque":"SEAT","model":"Toledo I","engine_code":"ACC"},"Peugeot 106 1.1 TU1M Mono-Jetronic":{"marque":"Peugeot","model":"106","engine_code":"TU1M"},"Fiat Tipo 1.4 i.e. Mono-Jetronic":{"marque":"Fiat","model":"Tipo","engine_code":null},"VW Passat B3 1.8 ABS Mono-Motronic":{"marque":"VW","model":"Passat B3","engine_code":"ABS"},"Audi 80 B3 1.8 PM Mono-Motronic":{"marque":"Audi","model":"80 B3","engine_code":"PM"},"Fiat Tipo 1.6 i.e. Bosch Mono-Motronic":{"marque":"Fiat","model":"Tipo","engine_code":null},"VW Passat B4 1.8 ABS Mono-Motronic":{"marque":"VW","model":"Passat B4","engine_code":"ABS"},"Renault 19 1.7 F3N Bosch Mono-Motronic":{"marque":"Renault","model":"19","engine_code":"F3N"},"SEAT Ibiza II 1.4 ABD Mono-Motronic":{"marque":"SEAT","model":"Ibiza II","engine_code":"ABD"},"Citroën AX 1.1 TU1M Mono-Jetronic":{"marque":"Citroën","model":"AX","engine_code":"TU1M"},"VW Golf III 1.8 ADZ Mono-Motronic":{"marque":"VW","model":"Golf III","engine_code":"ADZ"},"VW Vento 1.8 AAM Mono-Motronic":{"marque":"VW","model":"Vento","engine_code":"AAM"},"SEAT Toledo I 1.6 1F Mono-Motronic":{"marque":"SEAT","model":"Toledo I","engine_code":"1F"},"VW Passat B3 1.8 RP":{"marque":"VW","model":"Passat B3","engine_code":"RP"},"Audi 80 B4 2.0 ABT":{"marque":"Audi","model":"80 B4","engine_code":"ABT"},"VW Golf III 1.8 ABS":{"marque":"VW","model":"Golf III","engine_code":"ABS"},"SEAT Toledo I 1.6 1F":{"marque":"SEAT","model":"Toledo I","engine_code":"1F"},"Fiat Tipo 1.4 i.e.":{"marque":"Fiat","model":"Tipo","engine_code":null},"Audi 80 B3 1.8 PM":{"marque":"Audi","model":"80 B3","engine_code":"PM"},"Peugeot 405 1.6 BDY":{"marque":"Peugeot","model":"405","engine_code":"BDY"},"Citroën ZX 1.4 TU3M":{"marque":"Citroën","model":"ZX","engine_code":"TU3M"},"VW Vento 1.8 AAM":{"marque":"VW","model":"Vento","engine_code":"AAM"},"Lancia Dedra 1.6 i.e.":{"marque":"Lancia","model":"Dedra","engine_code":null},"VW Passat B4 1.8 ADZ":{"marque":"VW","model":"Passat B4","engine_code":"ADZ"},"SEAT Ibiza II 1.4 ABD":{"marque":"SEAT","model":"Ibiza II","engine_code":"ABD"},"Fiat Tempra 1.6 i.e.":{"marque":"Fiat","model":"Tempra","engine_code":null},"VW Golf III 1.8 AAM":{"marque":"VW","model":"Golf III","engine_code":"AAM"},"Peugeot 306 1.4 TU3M":{"marque":"Peugeot","model":"306","engine_code":"TU3M"},"Citroën AX 1.4 TU3M":{"marque":"Citroën","model":"AX","engine_code":"TU3M"},"VW Jetta II 1.8 RP":{"marque":"VW","model":"Jetta II","engine_code":"RP"},"Lancia Y10 1.1 i.e.":{"marque":"Lancia","model":"Y10","engine_code":null},"VW Passat B4 1.8 ABS":{"marque":"VW","model":"Passat B4","engine_code":"ABS"},"SEAT Toledo I 1.8 ABS":{"marque":"SEAT","model":"Toledo I","engine_code":"ABS"},"Fiat Uno 1.4 i.e.":{"marque":"Fiat","model":"Uno","engine_code":null},"VW Vento 1.8 ADZ":{"marque":"VW","model":"Vento","engine_code":"ADZ"},"SEAT Toledo I 1.8 ACC":{"marque":"SEAT","model":"Toledo I","engine_code":"ACC"},"Fiat Tipo 1.6 i.e.":{"marque":"Fiat","model":"Tipo","engine_code":null}}
+;
+
+  // ===================== Стеммер (упрощённый Snowball для русского) =====================
+
+  function stemRu(raw) {
+    let w = raw.toLowerCase().replace(/ё/g, "е");
+    if (w.length <= 3) return w;
+    if (!/[аеиоуыэюя]/.test(w)) return w;
+
+    const REFLEX = ["ся", "сь"];
+    for (const s of REFLEX) {
+      if (w.endsWith(s) && w.length - s.length >= 3) { w = w.slice(0, -s.length); break; }
+    }
+
+    const VERB = ["ившись","ывшись","вшись","ившим","ившей","ившего","ившему",
+      "уйте","ейте","ите","или","ыли","ила","ыла","ило","ыло","ена","ены","ено",
+      "ует","уют","ешь","ишь","ить","ыть","ять","еть","ать","ают","яют","ает","яет",
+      "ла","на","ли","ло","но","ет","ют","ны","ть","ем","ил","ыл","им","ым","ен",
+      "л","й","ив","ыв"];
+    const ADJ = ["ими","ыми","его","ому","ему",
+      "ая","яя","юю","ою","ею","ее","ие","ые","ое","ой","ий","ый",
+      "ем","им","ым","ом","их","ых","ую"];
+    const NOUN = ["иями","иях","ями","ами","ией","иям","ием",
+      "ей","ой","ий","ям","ах","ом","ем","ам",
+      "ы","ь","ию","ью","ю","ия","ья","я","ев","ов","ие","ье",
+      "е","и","о","у","а","й"];
+
+    function tryStrip(word, suffixes) {
+      const sorted = suffixes.slice().sort((a, b) => b.length - a.length);
+      for (const s of sorted) {
+        if (word.endsWith(s) && word.length - s.length >= 3) return word.slice(0, word.length - s.length);
+      }
+      return null;
+    }
+
+    let res = tryStrip(w, VERB);
+    if (res === null) res = tryStrip(w, ADJ);
+    if (res === null) res = tryStrip(w, NOUN);
+    if (res !== null) w = res;
+
+    if (w.endsWith("ейш") && w.length >= 5) w = w.slice(0, -3);
+    if (w.endsWith("ость") && w.length >= 7) w = w.slice(0, -4);
+    else if (w.endsWith("ост") && w.length >= 7) w = w.slice(0, -3);
+    if (w.endsWith("ь") && w.length >= 4) w = w.slice(0, -1);
+
+    return w;
+  }
+
+  // ===================== Токенизация / индекс / BM25 =====================
+
+  function tokenizeRaw(str) {
+    return ((str || "").toLowerCase().match(/[a-zа-яё0-9]+/gi) || []);
+  }
+
+  function expandTokens(rawTokens) {
+    const out = [];
+    for (const t of rawTokens) {
+      out.push(t);
+      if (ABBR[t]) out.push(...ABBR[t]);
+      if (MARQUE_SYNONYMS[t]) out.push(MARQUE_SYNONYMS[t]);
+    }
+    return out;
+  }
+
+  function processText(text) {
+    const raw = tokenizeRaw(text).filter(t => t.length > 1 && !STOPWORDS.has(t));
+    const expanded = expandTokens(raw);
+    return expanded.map(t => (/^[a-z0-9]+$/.test(t) ? t : stemRu(t)));
+  }
+
+  const W_MODEL = 2, W_ORIG = 1, W_RU = 4, W_SOL = 2;
+  const BM25_K1 = 1.5, BM25_B = 0.75;
+  const BOOST_ENGINE = 6.0, BOOST_MODEL = 3.0, BOOST_MARQUE = 1.2;
+
+  function buildIndex(docs) {
+    const N = docs.length;
+    const postings = new Map();
+    const docLen = new Float64Array(N);
+    let totalLen = 0;
+    const facets = new Array(N);
+
+    for (let i = 0; i < N; i++) {
+      const model = docs[i][2];
+      facets[i] = MODEL_LOOKUP[model] || { marque: null, model: null, engine_code: null };
+
+      const bag = [];
+      for (let k = 0; k < W_MODEL; k++) bag.push(...processText(docs[i][2]));
+      for (let k = 0; k < W_ORIG; k++) bag.push(...processText(docs[i][3]));
+      for (let k = 0; k < W_RU; k++) bag.push(...processText(docs[i][4]));
+      for (let k = 0; k < W_SOL; k++) bag.push(...processText(docs[i][5]));
+
+      docLen[i] = bag.length;
+      totalLen += bag.length;
+
+      const tf = new Map();
+      for (const tok of bag) tf.set(tok, (tf.get(tok) || 0) + 1);
+      for (const [tok, count] of tf) {
+        if (!postings.has(tok)) postings.set(tok, new Map());
+        postings.get(tok).set(i, count);
+      }
+    }
+
+    const avgLen = totalLen / N;
+
+    const marques = new Set();
+    const modelsByMarque = new Map();
+    const codesByMarque = new Map();
+    const codesByModel = new Map();
+    for (const f of facets) {
+      if (!f.marque) continue;
+      marques.add(f.marque);
+      if (!modelsByMarque.has(f.marque)) modelsByMarque.set(f.marque, new Set());
+      if (f.model) modelsByMarque.get(f.marque).add(f.model);
+      if (f.engine_code) {
+        if (!codesByMarque.has(f.marque)) codesByMarque.set(f.marque, new Set());
+        codesByMarque.get(f.marque).add(f.engine_code);
+        const key = f.marque + "|" + f.model;
+        if (!codesByModel.has(key)) codesByModel.set(key, new Set());
+        codesByModel.get(key).add(f.engine_code);
+      }
+    }
+
+    return { postings, docLen, avgLen, N, docs, facets,
+      facetLists: { marques, modelsByMarque, codesByMarque, codesByModel } };
+  }
+
+  function idf(N, df) { return Math.log(1 + (N - df + 0.5) / (df + 0.5)); }
+
+  function facetBoost(docFacet, sel) {
+    if (!docFacet || !docFacet.marque) return 0;
+    let boost = 0;
+    if (sel.engineCode && docFacet.engine_code === sel.engineCode) boost += BOOST_ENGINE;
+    if (sel.model && docFacet.model === sel.model && (!sel.marque || docFacet.marque === sel.marque)) boost += BOOST_MODEL;
+    if (sel.marque && docFacet.marque === sel.marque) boost += BOOST_MARQUE;
+    return boost;
+  }
+
+  function runSearch(index, query, sel) {
+    const rawTokens = tokenizeRaw(query).filter(t => t.length > 1 && !STOPWORDS.has(t));
+
+    if (!rawTokens.length) {
+      if (!sel.marque && !sel.model && !sel.engineCode) return { results: [], totalCandidates: 0, mode: "empty" };
+      const matched = [];
+      for (let i = 0; i < index.N; i++) {
+        const f = index.facets[i];
+        if (!f.marque) continue;
+        if (sel.marque && f.marque !== sel.marque) continue;
+        if (sel.model && f.model !== sel.model) continue;
+        if (sel.engineCode && f.engine_code !== sel.engineCode) continue;
+        matched.push(i);
+      }
+      const results = matched.map(i => {
+        const d = index.docs[i];
+        return { case_id: d[0], source: d[1], model: d[2], symptom_orig: d[3], symptom_ru: d[4], solution: d[5], percent: null };
+      });
+      return { results, totalCandidates: results.length, mode: "browse" };
+    }
+
+    const expanded = expandTokens(rawTokens);
+    const stems = [...new Set(expanded.map(t => (/^[a-z0-9]+$/.test(t) ? t : stemRu(t))))];
+    if (!stems.length) return { results: [], totalCandidates: 0, mode: "empty" };
+
+    const scores = new Map();
+    const matchedCount = new Map();
+    for (const stem of stems) {
+      const posting = index.postings.get(stem);
+      if (!posting) continue;
+      const df = posting.size;
+      const w = idf(index.N, df);
+      for (const [docIdx, tf] of posting) {
+        const dl = index.docLen[docIdx];
+        const denom = tf + BM25_K1 * (1 - BM25_B + BM25_B * (dl / index.avgLen));
+        const s = w * (tf * (BM25_K1 + 1)) / denom;
+        scores.set(docIdx, (scores.get(docIdx) || 0) + s);
+        matchedCount.set(docIdx, (matchedCount.get(docIdx) || 0) + 1);
+      }
+    }
+
+    let candidates = [...scores.keys()].map(docIdx => ({
+      docIdx,
+      score: scores.get(docIdx) + facetBoost(index.facets[docIdx], sel),
+      matched: matchedCount.get(docIdx),
+    }));
+
+    const totalCandidates = candidates.length;
+    if (!totalCandidates) return { results: [], totalCandidates: 0, mode: "empty" };
+
+    const maxMatched = Math.max(...candidates.map(c => c.matched));
+    const floor = maxMatched <= 1 ? 1 : Math.max(2, maxMatched - 1);
+
+    let minMatched = maxMatched;
+    let tier = [];
+    while (minMatched >= floor) {
+      tier = candidates.filter(c => c.matched >= minMatched);
+      if (tier.length >= 5 || minMatched === floor) break;
+      minMatched--;
+    }
+    tier.sort((a, b) => b.score - a.score);
+    const topScore = tier.length ? tier[0].score : 1;
+
+    return {
+      results: tier.map(c => {
+        const d = index.docs[c.docIdx];
+        return {
+          case_id: d[0], source: d[1], model: d[2],
+          symptom_orig: d[3], symptom_ru: d[4], solution: d[5],
+          score: c.score, percent: Math.max(1, Math.round(100 * c.score / topScore)),
+        };
+      }),
+      totalCandidates, mode: "search", tiered: tier.length < totalCandidates,
+    };
+  }
+
+  // ===================== UI =====================
 
   const els = {
     q: document.getElementById("q"),
     results: document.getElementById("results"),
     meta: document.getElementById("meta"),
-    filters: document.getElementById("filters"),
+    fMarque: document.getElementById("f-marque"),
+    fModel: document.getElementById("f-model"),
+    fEngine: document.getElementById("f-engine"),
   };
 
-  let DB = [];               // [case_id, source, model, symptom_orig, symptom_ru, solution]
-  let activeSource = "ALL";
+  let DB_INDEX = null;
   let currentResults = [];
   let shown = 0;
   const PAGE = 15;
-
-  function tokenize(str){
-    return (str.toLowerCase().match(/[a-zа-яё0-9]+/gi) || [])
-      .filter(t => t.length > 1 && !STOPWORDS.has(t));
-  }
 
   function escapeHtml(s){
     return (s || "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
   }
 
-  function highlight(text, tokens){
+  function highlight(text, rawQueryTokens){
     if (!text) return "";
     let out = escapeHtml(text);
-    const uniq = [...new Set(tokens.map(t=>t.toLowerCase()))].sort((a,b)=>b.length-a.length);
+    const uniq = [...new Set(rawQueryTokens.map(t=>t.toLowerCase()))].filter(t=>t.length>1).sort((a,b)=>b.length-a.length);
     uniq.forEach(t => {
-      if (!t) return;
       const re = new RegExp("(" + t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + ")", "gi");
       out = out.replace(re, "<b>$1</b>");
     });
     return out;
   }
 
-  function score(rec, tokens){
-    const hay = (rec[2] + " " + rec[3] + " " + rec[4] + " " + rec[5]).toLowerCase();
-    let matched = 0;
-    tokens.forEach(t => { if (hay.includes(t)) matched++; });
-    return matched;
+  function percentClass(p){
+    if (p === null) return "";
+    if (p >= 70) return "p-high";
+    if (p >= 40) return "p-mid";
+    return "p-low";
   }
 
-  function search(query){
-    const tokens = tokenize(query);
-    if (!tokens.length) return [];
-    let pool = DB;
-    if (activeSource !== "ALL") pool = DB.filter(r => r[1] === activeSource);
-
-    const scored = [];
-    for (const rec of pool){
-      const m = score(rec, tokens);
-      if (m > 0) scored.push([m, rec]);
-    }
-    scored.sort((a,b) => b[0] - a[0]);
-    return scored.map(([m, rec]) => ({rec, matched: m, tokens}));
-  }
-
-  function renderCard(item){
-    const [case_id, source, model, symptom_orig, symptom_ru, solution] = item.rec;
-    const symptom = symptom_ru || symptom_orig;
-    const srcLabel = {EU:"🌍", RU:"🇷🇺", DE:"🇩🇪"}[source] || "";
+  function renderCard(item, rawQueryTokens){
+    const symptom = item.symptom_ru || item.symptom_orig;
+    const percentHtml = item.percent === null ? "" :
+      `<span class="percent ${percentClass(item.percent)}">${item.percent}%</span>`;
     return `
       <div class="card">
-        <span class="id">${srcLabel} ${case_id}</span>
-        <div class="model">${escapeHtml(model)}</div>
-        <div class="symptom">❗️ ${highlight(symptom, item.tokens)}</div>
-        <div class="solution"><span class="label">Решение:</span> ${highlight(solution, item.tokens)}</div>
+        <div class="rowtop">
+          <span class="id">${item.case_id}</span>
+          ${percentHtml}
+        </div>
+        <div class="model">${escapeHtml(item.model)}</div>
+        <div class="symptom">❗️ ${highlight(symptom, rawQueryTokens)}</div>
+        <div class="solution"><span class="label">Решение:</span> ${highlight(item.solution, rawQueryTokens)}</div>
       </div>`;
+  }
+
+  function currentFacetSelection(){
+    return {
+      marque: els.fMarque.value || null,
+      model: els.fModel.value || null,
+      engineCode: els.fEngine.value || null,
+    };
+  }
+
+  function populateMarqueOptions(){
+    const marques = [...DB_INDEX.facetLists.marques].sort();
+    els.fMarque.innerHTML = '<option value="">Марка: –</option>' +
+      marques.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+  }
+
+  function populateModelOptions(){
+    const sel = currentFacetSelection();
+    let models;
+    if (sel.marque) {
+      models = [...(DB_INDEX.facetLists.modelsByMarque.get(sel.marque) || [])].sort();
+    } else {
+      const all = new Set();
+      for (const set of DB_INDEX.facetLists.modelsByMarque.values()) for (const m of set) all.add(m);
+      models = [...all].sort();
+    }
+    const keep = els.fModel.value;
+    els.fModel.innerHTML = '<option value="">Модель: –</option>' +
+      models.map(m => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("");
+    if (models.includes(keep)) els.fModel.value = keep; else els.fModel.value = "";
+  }
+
+  function populateEngineOptions(){
+    const sel = currentFacetSelection();
+    let codes;
+    if (sel.marque && sel.model) {
+      codes = [...(DB_INDEX.facetLists.codesByModel.get(sel.marque + "|" + sel.model) || [])].sort();
+    } else if (sel.marque) {
+      codes = [...(DB_INDEX.facetLists.codesByMarque.get(sel.marque) || [])].sort();
+    } else {
+      const all = new Set();
+      for (const set of DB_INDEX.facetLists.codesByMarque.values()) for (const c of set) all.add(c);
+      codes = [...all].sort();
+    }
+    const keep = els.fEngine.value;
+    els.fEngine.innerHTML = '<option value="">Двигатель: –</option>' +
+      codes.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+    if (codes.includes(keep)) els.fEngine.value = keep; else els.fEngine.value = "";
+  }
+
+  function updateFilterVisualState(){
+    [els.fMarque, els.fModel, els.fEngine].forEach(el => {
+      el.classList.toggle("active", !!el.value);
+    });
   }
 
   function renderResults(){
     const query = els.q.value.trim();
+    const sel = currentFacetSelection();
     els.results.innerHTML = "";
     els.meta.textContent = "";
 
-    if (!query){
+    const r = runSearch(DB_INDEX, query, sel);
+    currentResults = r.results;
+    shown = 0;
+
+    const rawQueryTokens = tokenizeRaw(query);
+
+    if (r.mode === "empty") {
       els.results.innerHTML = `<div id="hint-empty">
-        Введите симптом, модель авто или код ошибки.<br>
+        Введите симптом, модель авто или код ошибки — либо выберите марку/модель/двигатель для просмотра.<br>
         Например: <i>«плавает холостой ход»</i>, <i>«Audi 80 расход топлива»</i>, <i>«ДТОЖ»</i>.
       </div>`;
       return;
     }
 
-    currentResults = search(query);
-    shown = 0;
-
-    if (!currentResults.length){
+    if (!r.results.length){
       els.meta.textContent = `Найдено: 0`;
       els.results.innerHTML = `<div id="empty">
         По запросу «${escapeHtml(query)}» ничего не найдено.<br><br>
@@ -246,13 +554,15 @@
       return;
     }
 
-    els.meta.textContent = `Найдено: ${currentResults.length}`;
-    appendPage();
+    const modeLabel = r.mode === "browse" ? "Кейсов по выбранному фильтру" : "Найдено релевантных";
+    els.meta.textContent = `${modeLabel}: ${r.results.length}` + (r.mode === "search" && r.tiered ? ` (из ${r.totalCandidates} совпадений)` : "");
+
+    appendPage(rawQueryTokens);
   }
 
-  function appendPage(){
+  function appendPage(rawQueryTokens){
     const next = currentResults.slice(shown, shown + PAGE);
-    const html = next.map(renderCard).join("");
+    const html = next.map(item => renderCard(item, rawQueryTokens)).join("");
     const btnOld = document.getElementById("loadmore");
     if (btnOld) btnOld.remove();
     els.results.insertAdjacentHTML("beforeend", html);
@@ -261,7 +571,7 @@
       const btn = document.createElement("button");
       btn.id = "loadmore";
       btn.textContent = `Показать ещё (${currentResults.length - shown})`;
-      btn.onclick = appendPage;
+      btn.onclick = () => appendPage(rawQueryTokens);
       els.results.appendChild(btn);
     }
   }
@@ -272,12 +582,19 @@
     debounceTimer = setTimeout(renderResults, 150);
   });
 
-  els.filters.addEventListener("click", (e) => {
-    const chip = e.target.closest(".chip");
-    if (!chip) return;
-    [...els.filters.children].forEach(c => c.classList.remove("active"));
-    chip.classList.add("active");
-    activeSource = chip.dataset.src;
+  els.fMarque.addEventListener("change", () => {
+    populateModelOptions();
+    populateEngineOptions();
+    updateFilterVisualState();
+    renderResults();
+  });
+  els.fModel.addEventListener("change", () => {
+    populateEngineOptions();
+    updateFilterVisualState();
+    renderResults();
+  });
+  els.fEngine.addEventListener("change", () => {
+    updateFilterVisualState();
     renderResults();
   });
 
@@ -285,7 +602,10 @@
   fetch("cases.json")
     .then(r => r.json())
     .then(data => {
-      DB = data;
+      DB_INDEX = buildIndex(data);
+      populateMarqueOptions();
+      populateModelOptions();
+      populateEngineOptions();
       els.results.innerHTML = "";
       renderResults();
     })
